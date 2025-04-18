@@ -1,0 +1,4 @@
+# 忽略data目录
+/data/
+/data/*
+
