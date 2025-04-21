@@ -1,152 +1,150 @@
-import os
-import argparse
-from tqdm import tqdm
-from multiprocessing import Pool
 import numpy as np
 from hashlib import sha256
+from multiprocessing import Pool
+from tqdm import tqdm
 import pickle
-import json 
+import os
 
-PIX_PAD = 4
-CMD_PAD = 3
-COORD_PAD = 4
-EXT_PAD = 1
+NUM_THREADS = 36
 EXTRA_PAD = 1
-R_PAD = 2
-NUM_TRHEADS = 36
 
-def hash_loop_se(data):
-    if len(data['se_ext']) == 0: 
-        return '', '' # empty
-
-    pixs = []
-    for pix in data['se_pix']:
-        pix += EXTRA_PAD  # smallest is 0 => smallest is 1
-        pixs.append(pix)
-    pixs.append(np.zeros(1).astype(int))  # 0 for End of SE
-    pixs = np.hstack(pixs)
-
-    exts = []
-    for ext in data['se_ext']:
-        ext += EXTRA_PAD  # smallest is 0 => smallest is 1
-        exts.append(ext)
-    exts.append(np.zeros(1).astype(int))  # 0 for End of SE
-    exts = np.hstack(exts)
-
-    final = np.concatenate((pixs, exts))
-   
-    # Hash the loop parameters
-    loop_hash = sha256(np.ascontiguousarray(final)).hexdigest()
-    uid = data['uid']
-    return loop_hash, uid
-
-
-def hash_loop_s(data):
-    if len(data['se_ext']) == 0: 
-        return '', '' # empty
-
-    pixs = []
-    for pix in data['se_pix']:
-        pix += EXTRA_PAD  # smallest is 0 => smallest is 1
-        pixs.append(pix)
-    pixs.append(np.zeros(1).astype(int))  # 0 for End of SE
-    pixs = np.hstack(pixs)
-   
-    # Hash the loop parameters
-    loop_hash = sha256(np.ascontiguousarray(pixs)).hexdigest()
-    uid = data['uid']
-    return loop_hash, uid
-
-
-def hash_loop_e(data):
-    if len(data['se_ext']) == 0: 
-        return '', '' # empty
-
-    exts = []
-    for ext in data['se_ext']:
-        ext += EXTRA_PAD  # smallest is 0 => smallest is 1
-        exts.append(ext)
-    exts.append(np.zeros(1).astype(int))  # 0 for End of SE
-    exts = np.hstack(exts)
-   
-    # Hash the loop parameters
-    loop_hash = sha256(np.ascontiguousarray(exts)).hexdigest()
-    uid = data['uid']
-    return loop_hash, uid
+def hash_face(data, include_loop_type=True):
+    """对整个face进行哈希"""
+    if not data['sketch_matrix']:
+        return '', ''
     
+    face_data = []
+    for face in data['sketch_matrix']:
+        for loop in face:
+            # 点坐标
+            for edge in loop[:-1]:
+                for point in edge:
+                    face_data.extend([p + EXTRA_PAD for p in point])
+            # 可选择是否包含内外环标记
+            if include_loop_type:
+                face_data.extend(loop[-1])
+    
+    face_array = np.array(face_data, dtype=np.float32)
+    face_hash = sha256(face_array.tobytes()).hexdigest()
+    return face_hash, data['file_id']
 
-def flatten(t):
-    return [item for sublist in t for item in sublist]
+def hash_loop(data):
+    """对每个loop单独进行哈希"""
+    if not data['sketch_matrix']:
+        return [], ''
+    
+    loop_hashes = []
+    for face in data['sketch_matrix']:
+        for loop in face:
+            loop_points = []
+            for edge in loop[:-1]:  # 除去标记
+                for point in edge:
+                    loop_points.extend([p + EXTRA_PAD for p in point])
+            loop_array = np.array(loop_points, dtype=np.float32)
+            loop_hash = sha256(loop_array.tobytes()).hexdigest()
+            loop_hashes.append(loop_hash)
+    
+    return loop_hashes, data['file_id']
 
+def hash_extrude(data):
+    """对挤出操作相关参数进行哈希"""
+    if not data['extrude_param'] or not data['transform_matrix']:
+        return '', ''
+    
+    # 合并挤出参数和变换矩阵
+    extrude_data = []
+    # 添加挤出参数
+    for param in data['extrude_param']:
+        extrude_data.extend([p + EXTRA_PAD for p in param])
+    
+    # 添加变换矩阵
+    for row in data['transform_matrix']:
+        extrude_data.extend([p + EXTRA_PAD for p in row])
+    
+    extrude_array = np.array(extrude_data, dtype=np.float32)
+    extrude_hash = sha256(extrude_array.tobytes()).hexdigest()
+    return extrude_hash, data['file_id']
 
-def parallel_hash_loops(loops, hash_type):
-    """ Parallel hash generated data """
+def parallel_hash_data(data_list, hash_type):
+    """并行处理哈希计算"""
+    hash_funcs = {
+        'face': hash_face,
+        'loop': hash_loop,
+        'extrude': hash_extrude
+    }
+    
+    hash_func = hash_funcs[hash_type]
     duplicate_groups = {}
-    if hash_type =='se':
-        objs_iter = Pool(NUM_TRHEADS).imap(hash_loop_se, loops)
-    elif hash_type =='s':
-        objs_iter = Pool(NUM_TRHEADS).imap(hash_loop_s, loops)
-    elif hash_type =='e':
-        objs_iter = Pool(NUM_TRHEADS).imap(hash_loop_e, loops)
-    for h, uid in tqdm(objs_iter, total=len(loops)):
-        if len(h)>0:
-            if not h in duplicate_groups:
-                duplicate_groups[h] = []
-            duplicate_groups[h].append([uid])
+    
+    with Pool(NUM_THREADS) as pool:
+        results = list(tqdm(
+            pool.imap(hash_func, data_list),
+            total=len(data_list),
+            desc=f"Hashing {hash_type}"
+        ))
+    
+    for hashes, file_id in results:
+        if hash_type == 'loop':  # loop返回多个哈希值
+            for h in hashes:
+                if h not in duplicate_groups:
+                    duplicate_groups[h] = []
+                duplicate_groups[h].append(file_id)
+        else:  # face和extrude返回单个哈希值
+            h = hashes
+            if h and len(h) > 0:
+                if h not in duplicate_groups:
+                    duplicate_groups[h] = []
+                duplicate_groups[h].append(file_id)
+    
     return duplicate_groups
 
+def deduplicate_data(data_list, hash_type):
+    """执行去重操作"""
+    duplicate_groups = parallel_hash_data(data_list, hash_type)
+    
+    # 统计重复情况
+    unique_files = set()
+    for group in duplicate_groups.values():
+        unique_files.add(group[0])  # 只保留每组第一个文件
+    
+    # 生成去重后的数据集
+    deduped_data = [d for d in data_list if d['file_id'] in unique_files]
+    
+    # 计算统计信息
+    total = len(data_list)
+    unique = len(deduped_data)
+    duplicate_rate = (total - unique) / total * 100
+    
+    stats = {
+        'total_count': total,
+        'unique_count': unique,
+        'duplicate_rate': duplicate_rate
+    }
+    
+    return deduped_data, stats
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--datapath", type=str, required=True)
-    parser.add_argument("--hash_type", type=str, required=True)
-    args = parser.parse_args()
-
-    # Load loops
-    print('loading data...')
-    with open(os.path.join(args.datapath, 'train.pkl'), 'rb') as f:
-        loops = pickle.load(f)
-   
-    # Assign UID
-    for idx, data in enumerate(loops):
-        data['uid'] = idx
- 
-    # Hash loops
-    print('hashing...')
-    gen_len = len(loops)
-    gen_groups = parallel_hash_loops(loops, args.hash_type)
+    # 设置输入输出路径
+    data_dir = "/home/malacca/3DLLM/data/3dllm_data"
+    hash_type = "extrude"  # 可选: face, loop, extrude
     
-    # Uniqueness
-    print('uniqueness...')
-    num_files_in_groups = []
-    for g in tqdm(gen_groups.values()):
-        num_files_in_group = len(g)
-        num_files_in_groups.append(num_files_in_group)
-    unique_count = np.sum(np.array(num_files_in_groups)==1)
-    unique_percent = (unique_count / gen_len) * 100.0
-    print(f"\tUnique Percentage: {unique_percent:.2f}%")
-
-    with open('../data/train_val_test_split.json') as f:  
-        data_split = json.load(f)
-
-    print('creating new data...')
-    unique_uid = {}
-
-    for g in tqdm(gen_groups.values()):
-        uid = g[0][0] # only choose one 
-        unique_uid[uid] = True
-
-    trainset = []
-    for loop in tqdm(loops):
-        uid = loop['uid']
-        if uid in unique_uid.keys():
-            trainset.append(loop)
-        else:
-            pass
-
-    with open(os.path.join(args.datapath, "train_deduplicate_"+args.hash_type+".pkl"), "wb") as tf:
-        pickle.dump(trainset, tf)
-
-    print("Duplicate Stats:")
-    print(f"\tUnique Percentage: {unique_percent:.2f}%")
-    print(f"\tUnique Train Dataset Length: {len(trainset)}")
+    # 加载数据
+    print("正在加载数据...")
+    with open(os.path.join(data_dir, "train.pkl"), "rb") as f:
+        train_data = pickle.load(f)
+    
+    # 执行去重
+    print(f"使用{hash_type}方式进行去重...")
+    deduped_data, stats = deduplicate_data(train_data, hash_type)
+    
+    # 保存去重后的数据
+    output_path = os.path.join(data_dir, f"train_dedup_{hash_type}.pkl")
+    with open(output_path, "wb") as f:
+        pickle.dump(deduped_data, f)
+    
+    # 打印统计信息
+    print("\n去重统计信息:")
+    print(f"原始数据量: {stats['total_count']}")
+    print(f"去重后数据量: {stats['unique_count']}")
+    print(f"重复率: {stats['duplicate_rate']:.2f}%")
+    print(f"去重后的数据已保存至: {output_path}")
