@@ -1,0 +1,43 @@
+# 数据路径配置
+data:
+  train:
+    face: '/data-6t/malacca/3DLLM/data/3dllm_data/face/train_face.pkl'
+    loop: '/data-6t/malacca/3DLLM/data/3dllm_data/train_dedup_loop.pkl'
+    extrude: '/data-6t/malacca/3DLLM/data/3dllm_data/train_dedup_extrude.pkl'
+  test: '/data-6t/malacca/3DLLM/data/3dllm_data/face/test_face.pkl'
+  val: '/data-6t/malacca/3DLLM/data/3dllm_data/face/validation_face.pkl'
+
+# 训练参数
+training:
+  batch_size: 32
+  num_workers: 4
+  learning_rate: 5e-5
+  num_epochs: 100
+  save_dir: '/data-6t/malacca/3DLLM/codec/checkpoints'
+  log_dir: '/data-6t/malacca/3DLLM/codec/logs'  # TensorBoard日志目录
+  device: 'cuda'  # 或 'cpu'
+  gpu_ids: [1]  # 可用的GPU ID列表
+  train_mode: face  # 可选: face, loop, extrude
+  save_every: 10
+  validate_every: 10
+
+# 模型参数
+model:
+  face:
+    num_embeddings: 128
+    embedding_dim: 32
+    commitment_cost: 0.1
+    input_dim: 8  # face参数维度
+    hidden_dim: 64
+  loop:
+    num_embeddings: 512
+    embedding_dim: 64
+    commitment_cost: 0.25
+    input_dim: 6  # loop参数维度
+    hidden_dim: 128
+  extrude:
+    num_embeddings: 512
+    embedding_dim: 64
+    commitment_cost: 0.25
+    input_dim: 6  # extrude参数维度
+    hidden_dim: 128 
